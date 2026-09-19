@@ -230,7 +230,11 @@ Development branch: `codex/company-knowledge-mvp`. Original main/base:
 `2f67311b881b0e769a39886ca8439a97354d836c`. The recovered audit/reproducibility commit
 is `97abfd2`; backend implementation is `c079be1` and the frontend/browser workflow
 is `78045a1`. This documentation is a subsequent commit. The final execution handoff
-records the published tip; inspect exact local history with:
+records the published tip. These hashes identify the preserved local checkpoints.
+Terminal Git has no push credentials here; publishing through the connected GitHub
+integration assigns new commit IDs. Publication is verified by matching the complete
+Git tree hashes, while preserving the original local history. Inspect the history in
+your checkout with:
 
 ```powershell
 git status --short --branch
