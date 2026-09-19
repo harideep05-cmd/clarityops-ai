@@ -1,54 +1,443 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { api, downloadDocument } from "./api";
 import "./App.css";
 
+const suggestions = [
+  "How many casual leave days do employees receive?",
+  "When should I submit an expense claim?",
+  "What should I do if my company laptop is lost?",
+];
+
 function App() {
-  const [prompt, setPrompt] = useState("");
-  const [response, setResponse] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [credential, setCredential] = useState("");
+  const [token, setToken] = useState("");
+  const [documents, setDocuments] = useState([]);
+  const [status, setStatus] = useState(null);
+  const [question, setQuestion] = useState("");
+  const [asked, setAsked] = useState("");
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const input = useRef(null);
 
-  const askAI = async () => {
-    if (!prompt.trim()) return;
-
-    setLoading(true);
-
+  async function connect(event) {
+    event.preventDefault();
+    setBusy("connect");
+    setError("");
     try {
-      const res = await fetch("http://127.0.0.1:8000/ask", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          prompt: prompt,
-        }),
-      });
-
-      const data = await res.json();
-      setResponse(data.response);
-    } catch (err) {
-      setResponse("Error connecting to backend.");
+      const [info, list] = await Promise.all([
+        api("/status", credential),
+        api("/documents", credential),
+      ]);
+      setStatus(info);
+      setDocuments(list.documents);
+      setToken(credential);
+      setCredential("");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy("");
     }
+  }
 
-    setLoading(false);
-  };
+  async function upload(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setError("");
+    setNotice("");
+    if (!file.name.toLowerCase().endsWith(".pdf"))
+      return setError("Choose a text-based PDF file.");
+    if (file.size > 10 * 1024 * 1024)
+      return setError("PDFs must be 10 MB or smaller.");
+    setBusy("upload");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const data = await api("/upload", token, { method: "POST", body: form });
+      const list = await api("/documents", token);
+      setDocuments(list.documents);
+      setNotice(
+        data.duplicate
+          ? "This document is already in your workspace."
+          : `${data.document.filename} is ready for questions.`,
+      );
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function ask(event) {
+    event.preventDefault();
+    if (!question.trim() || busy) return;
+    setBusy("ask");
+    setError("");
+    setResult(null);
+    setAsked(question.trim());
+    setNotice("");
+    try {
+      setResult(
+        await api("/ask", token, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt: question.trim() }),
+        }),
+      );
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function remove(doc) {
+    if (
+      !window.confirm(
+        `Remove ${doc.filename}? Its original PDF and searchable content will be deleted from this workspace.`,
+      )
+    )
+      return;
+    setBusy("delete");
+    setError("");
+    setNotice("");
+    try {
+      await api(`/documents/${doc.id}`, token, { method: "DELETE" });
+      setDocuments(documents.filter((d) => d.id !== doc.id));
+      setResult(null);
+      setAsked("");
+      setNotice(`${doc.filename} was removed.`);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function lock() {
+    setToken("");
+    setDocuments([]);
+    setStatus(null);
+    setQuestion("");
+    setAsked("");
+    setResult(null);
+    setError("");
+    setNotice("");
+  }
 
   return (
-    <div className="container">
-      <h1>🚀 ClarityOps AI</h1>
-
-      <textarea
-        placeholder="Ask Gemini anything..."
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-      />
-
-      <button onClick={askAI}>
-        {loading ? "Thinking..." : "Ask AI"}
-      </button>
-
-      <div className="response">
-        <h2>Response</h2>
-        <p>{response}</p>
-      </div>
+    <div className="app-shell">
+      <header className="topbar">
+        <a className="brand" href="/" aria-label="ClarityOps AI home">
+          <span className="brand-mark">C</span>
+          <span>
+            ClarityOps <span className="brand-ai">AI</span>
+          </span>
+        </a>
+        <div className="topbar-right">
+          <span className="workspace-label">Company knowledge</span>
+          {token && (
+            <button className="quiet-button" disabled={!!busy} onClick={lock}>
+              Lock workspace
+            </button>
+          )}
+        </div>
+      </header>
+      {!token ? (
+        <main className="unlock-layout">
+          <div className="unlock-intro">
+            <p className="eyebrow">YOUR COMPANY, IN CONTEXT</p>
+            <h1>
+              Clear answers.
+              <br />
+              From your documents.
+            </h1>
+            <p>
+              Find the policies, procedures, and details your team needs, with
+              evidence you can check.
+            </p>
+            <div className="intro-steps">
+              <span>01 &nbsp; Add your PDFs</span>
+              <span>02 &nbsp; Ask a question</span>
+              <span>03 &nbsp; Check the source</span>
+            </div>
+          </div>
+          <form className="unlock-card" onSubmit={connect}>
+            <span className="small-mark">WORKSPACE ACCESS</span>
+            <h2>Open your workspace</h2>
+            <p>Enter the access token provided by your workspace owner.</p>
+            <label htmlFor="access-token">Workspace access token</label>
+            <input
+              id="access-token"
+              type="password"
+              autoComplete="off"
+              value={credential}
+              onChange={(e) => setCredential(e.target.value)}
+              required
+              disabled={!!busy}
+            />
+            {error && (
+              <div className="error" role="alert">
+                {error}
+              </div>
+            )}
+            <button className="primary" disabled={!!busy || !credential.trim()}>
+              {busy === "connect" ? "Connecting…" : "Open workspace →"}
+            </button>
+            <p className="fine-print">
+              Access lasts until you lock or reload this page.
+            </p>
+          </form>
+        </main>
+      ) : (
+        <main className="workspace">
+          <div className="page-heading">
+            <div>
+              <p className="eyebrow">YOUR WORKSPACE</p>
+              <h1>Company knowledge</h1>
+              <p>
+                Ask a question. Get an answer you can trace back to the source.
+              </p>
+            </div>
+            <span className="count-badge">
+              {documents.length} document{documents.length === 1 ? "" : "s"}{" "}
+              ready
+            </span>
+          </div>
+          <div aria-live="polite">
+            {notice && (
+              <div className="notice" role="status">
+                {notice}
+              </div>
+            )}
+          </div>
+          {error && (
+            <div className="error" role="alert">
+              {error}
+            </div>
+          )}
+          {status && !status.gemini_configured && (
+            <div className="setup-notice">
+              Documents can be indexed, but answer generation needs setup. The
+              workspace owner must configure Gemini on the server.
+            </div>
+          )}
+          {status && !status.embedding_files_present && (
+            <div className="setup-notice">
+              Document search needs setup. Ask the workspace owner to prepare
+              the local search model.
+            </div>
+          )}
+          <div className="workspace-grid">
+            <aside className="documents-panel">
+              <div className="panel-title">
+                <h2>Documents</h2>
+                <span>{documents.length.toString().padStart(2, "0")}</span>
+              </div>
+              <p className="panel-description">
+                Build a trusted source for your team.
+              </p>
+              <input
+                ref={input}
+                type="file"
+                accept=".pdf,application/pdf"
+                onChange={upload}
+                aria-label="Upload a PDF"
+                className="file-input"
+                disabled={!!busy}
+              />
+              <button
+                className="upload-button"
+                disabled={!!busy}
+                onClick={() => input.current.click()}
+              >
+                <span aria-hidden="true">↑</span>
+                {busy === "upload" ? "Processing document…" : "Upload PDF"}
+              </button>
+              <p className="fine-print upload-hint">
+                Text-based PDF · Up to 10 MB · 100 pages
+                <br />
+                Scanned PDFs need a text layer.
+              </p>
+              <div className="document-list" aria-live="polite">
+                {documents.length === 0 ? (
+                  <div className="empty-docs">
+                    <div className="paper-icon" aria-hidden="true">
+                      ≡
+                    </div>
+                    <h3>Your knowledge starts here</h3>
+                    <p>Upload a handbook, policy, or SOP to begin.</p>
+                  </div>
+                ) : (
+                  documents.map((doc) => (
+                    <article className="document" key={doc.id}>
+                      <span className="pdf-label">PDF</span>
+                      <div className="document-details">
+                        <h3>{doc.filename}</h3>
+                        <p>
+                          {doc.page_count} page{doc.page_count === 1 ? "" : "s"}{" "}
+                          <span aria-hidden="true">·</span> Ready
+                        </p>
+                      </div>
+                      <button
+                        className="remove-button"
+                        onClick={() => remove(doc)}
+                        disabled={!!busy}
+                        aria-label={`Remove ${doc.filename}`}
+                        title="Remove document"
+                      >
+                        ×
+                      </button>
+                      {doc.warnings.map((w) => (
+                        <p key={w} className="document-warning">
+                          {w}
+                        </p>
+                      ))}
+                    </article>
+                  ))
+                )}
+              </div>
+              <p className="workspace-note">
+                This workspace shares one document collection. Everyone with its
+                access token can read and remove documents.
+              </p>
+            </aside>
+            <section
+              className="question-panel"
+              aria-label="Ask your company documents"
+            >
+              <div className="question-header">
+                <span className="small-mark">KNOWLEDGE ASSISTANT</span>
+                <span className="evidence-label">
+                  <span aria-hidden="true">●</span> Answers with sources
+                </span>
+              </div>
+              <h2>What would you like to know?</h2>
+              <form onSubmit={ask}>
+                <label className="sr-only" htmlFor="question">
+                  Company question
+                </label>
+                <textarea
+                  id="question"
+                  placeholder="For example, how many casual leave days do employees receive?"
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  maxLength={1500}
+                  disabled={!!busy}
+                  rows={4}
+                />
+                <div className="question-actions">
+                  <span>
+                    {documents.length
+                      ? "Grounded in your uploaded documents"
+                      : "Upload a document to start asking questions"}
+                  </span>
+                  <button
+                    className="primary"
+                    disabled={
+                      !!busy || question.trim().length < 2 || !documents.length
+                    }
+                  >
+                    {busy === "ask" ? "Finding an answer…" : "Ask question →"}
+                  </button>
+                </div>
+              </form>
+              {!result && !asked && (
+                <div className="suggestions">
+                  <p>Try asking</p>
+                  {suggestions.map((s) => (
+                    <button
+                      disabled={!!busy}
+                      key={s}
+                      onClick={() => setQuestion(s)}
+                    >
+                      {s}
+                      <span aria-hidden="true">↗</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {busy === "ask" && (
+                <div className="answer-loading" role="status">
+                  <span className="loading-dot" />
+                  Searching your documents and checking the evidence…
+                </div>
+              )}
+              {result && (
+                <section
+                  className="answer-section"
+                  aria-live="polite"
+                  aria-label="Answer"
+                >
+                  <div className="answer-heading">
+                    <h3>
+                      {result.status === "answered"
+                        ? "Answer"
+                        : "More information needed"}
+                    </h3>
+                    <span>
+                      {result.sources.length
+                        ? `${result.sources.length} source${result.sources.length === 1 ? "" : "s"}`
+                        : "No supported answer"}
+                    </span>
+                  </div>
+                  <p className="asked-question">{asked}</p>
+                  <div className="answer-text">{result.answer}</div>
+                  {!!result.sources.length && (
+                    <div className="sources">
+                      <h4>Check the evidence</h4>
+                      {result.sources.map((source) => (
+                        <details key={source.id} className="source" open>
+                          <summary>
+                            <span className="source-id">{source.id}</span>
+                            <span>{source.document}</span>
+                            <span className="page-label">
+                              Page {source.page}
+                            </span>
+                          </summary>
+                          {source.quotes.map((text, i) => (
+                            <blockquote key={i}>{text}</blockquote>
+                          ))}
+                          <button
+                            className="text-button"
+                            disabled={!!busy}
+                            onClick={async () => {
+                              try {
+                                await downloadDocument(source, token);
+                              } catch (e) {
+                                setError(e.message);
+                              }
+                            }}
+                          >
+                            Download source PDF ↓
+                          </button>
+                        </details>
+                      ))}
+                    </div>
+                  )}
+                  {result.status !== "answered" && (
+                    <p className="answer-hint">
+                      Try a more specific question or upload a document that
+                      covers this topic.
+                    </p>
+                  )}
+                </section>
+              )}
+              <p className="privacy-note">
+                Your question and selected document excerpts are sent to Gemini
+                to generate answers. Check the cited source before acting on a
+                policy.
+              </p>
+            </section>
+          </div>
+        </main>
+      )}
+      <footer className="footer">
+        <span>ClarityOps AI</span>
+        <span>Company knowledge, made clear.</span>
+      </footer>
     </div>
   );
 }
