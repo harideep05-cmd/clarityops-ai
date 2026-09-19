@@ -42,3 +42,19 @@ frontend/dist/
 # Operating system files
 .DS_Store
 Thumbs.db
+
+# Private knowledge, model cache, tests and local tooling
+data/
+uploads/
+*.sqlite*
+*.db
+.cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+test-results/
+playwright-report/
+tmp/
+*.pem
+*.key
