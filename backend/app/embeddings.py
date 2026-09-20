@@ -35,13 +35,14 @@ class LocalEmbeddings:
                         raise ValueError("Model checksum mismatch")
                 from fastembed import TextEmbedding
 
-                self._model = TextEmbedding(
+                model = TextEmbedding(
                     MODEL_NAME,
                     specific_model_path=str(self.directory),
                     local_files_only=True,
                     threads=2,
                 )
                 self.model_id = MODEL_NAME + ":" + MODEL_REVISION
+                self._model = model
             except Exception:
                 raise AppError(
                     503,

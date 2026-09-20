@@ -7,15 +7,19 @@ import uuid
 from collections import deque
 
 from starlette.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
+
+from .identity import DEMO_PRINCIPAL
 
 
 class RequestGuard:
     """Authenticate and bound body size BEFORE FastAPI's multipart parser runs."""
 
-    def __init__(self, app, settings):
+    def __init__(self, app, settings, authenticate=None):
         self.app, self.settings = app, settings
+        self.authenticate = authenticate
         self.inflight = threading.BoundedSemaphore(4)
-        self.requests = deque()
+        self.requests = {}
         self.lock = threading.Lock()
 
     async def __call__(self, scope, receive, send):
@@ -49,21 +53,41 @@ class RequestGuard:
             return await respond(403, "origin_denied", "This origin is not allowed.")
         if scope["method"] == "OPTIONS":
             return await self.app(scope, receive, secure_send)
-        if not self.settings.access_token:
-            return await respond(
-                503, "workspace_not_configured", "The workspace access token is not configured on the server."
-            )
-        if not hmac.compare_digest(
-            headers.get("x-clarityops-token", "").encode(), self.settings.access_token.encode()
+        token = headers.get("x-clarityops-token", "")
+        principal = None
+        if self.settings.auth_mode == "members":
+            try:
+                if self.authenticate:
+                    principal = await run_in_threadpool(self.authenticate, token)
+            except Exception as exc:
+                logging.getLogger("clarityops").error("authentication_failed type=%s", type(exc).__name__)
+                return await respond(503, "authentication_unavailable", "Access verification is unavailable. Try again later.")
+        elif self.settings.auth_mode == "demo":
+            if not self.settings.access_token:
+                return await respond(
+                    503, "workspace_not_configured", "The workspace access token is not configured on the server."
+                )
+            if hmac.compare_digest(token.encode(), self.settings.access_token.encode()):
+                principal = DEMO_PRINCIPAL
+        if principal is None:
+            return await respond(401, "unauthorized", "Enter a valid workspace access token to continue.")
+        scope["state"]["principal"] = principal
+        # Reject employee writes before reading or parsing even a single body byte.
+        if not principal.can_manage and (
+            scope["path"].split("/")[1] in {"members", "audit"}
+            or (scope["method"] not in {"GET", "HEAD"} and not (
+                scope["method"] == "POST" and scope["path"] == "/ask"
+            ))
         ):
-            return await respond(401, "unauthorized", "Enter the workspace access token to continue.")
+            return await respond(403, "owner_required", "Only a workspace owner can perform this action.")
         with self.lock:
             now = time.monotonic()
-            while self.requests and self.requests[0] < now - 60:
-                self.requests.popleft()
-            limited = len(self.requests) >= self.settings.requests_per_minute
+            requests = self.requests.setdefault(principal.workspace_id, deque())
+            while requests and requests[0] < now - 60:
+                requests.popleft()
+            limited = len(requests) >= self.settings.requests_per_minute
             if not limited:
-                self.requests.append(now)
+                requests.append(now)
         if limited:
             return await respond(429, "rate_limited", "Too many requests. Wait a minute and try again.")
         if not self.inflight.acquire(blocking=False):

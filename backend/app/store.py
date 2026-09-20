@@ -11,7 +11,7 @@ from .config import Settings
 from .errors import AppError
 
 
-PUBLIC_COLUMNS = "id, filename, bytes, page_count, chunk_count, created_at, warnings"
+PUBLIC_COLUMNS = "id, filename, bytes, page_count, chunk_count, created_at, warnings, created_by"
 
 
 class Store:
@@ -39,7 +39,13 @@ class Store:
                     embedding BLOB NOT NULL, embedding_model TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS chunks_document ON chunks(document_id);
+                CREATE TABLE IF NOT EXISTS document_events (
+                    id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, action TEXT NOT NULL,
+                    subject_id TEXT NOT NULL, created_at TEXT NOT NULL
+                );
             """)
+            if "created_by" not in {r[1] for r in db.execute("PRAGMA table_info(documents)")}:
+                db.execute("ALTER TABLE documents ADD COLUMN created_by TEXT")
         self.path.chmod(0o600)
 
     @contextmanager
@@ -64,6 +70,7 @@ class Store:
         return {
             **{k: row[k] for k in ("id", "filename", "bytes", "page_count", "chunk_count", "created_at")},
             "warnings": json.loads(row["warnings"]),
+            "created_by": row["created_by"],
             "status": "ready",
         }
 
@@ -83,7 +90,7 @@ class Store:
                 ).fetchone()
             )
 
-    def add_document(self, filename, data, pages, chunks, vectors, model_id, warnings):
+    def add_document(self, filename, data, pages, chunks, vectors, model_id, warnings, actor_id="demo-owner"):
         if len(chunks) != len(vectors) or not chunks:
             raise AppError(503, "indexing_failed", "Document indexing did not complete. Please retry.")
         with self.connection() as db:
@@ -110,7 +117,9 @@ class Store:
                 )
             doc_id = uuid.uuid4().hex
             db.execute(
-                "INSERT INTO documents VALUES (?,?,?,?,?,?,?,?,?,?)",
+                """INSERT INTO documents
+                (id, filename, name_key, sha256, bytes, page_count, chunk_count, created_at, warnings, original, created_by)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     doc_id,
                     filename,
@@ -122,6 +131,7 @@ class Store:
                     datetime.now(timezone.utc).isoformat(),
                     json.dumps(warnings),
                     data,
+                    actor_id,
                 ),
             )
             for i, (chunk, vector) in enumerate(zip(chunks, vectors, strict=True)):
@@ -141,6 +151,7 @@ class Store:
                         model_id,
                     ),
                 )
+            self._event(db, actor_id, "document.uploaded", doc_id)
             return self.public(
                 db.execute(f"SELECT {PUBLIC_COLUMNS} FROM documents WHERE id=?", (doc_id,)).fetchone()
             ), False
@@ -159,10 +170,21 @@ class Store:
         with self.connection() as db:
             return {r[0] for r in db.execute("SELECT id FROM documents")}.issuperset(ids)
 
-    def delete(self, doc_id):
+    @staticmethod
+    def _event(db, actor_id, action, doc_id):
+        db.execute("INSERT INTO document_events VALUES (?,?,?,?,?)",
+                   (uuid.uuid4().hex, actor_id, action, doc_id, datetime.now(timezone.utc).isoformat()))
+
+    def events(self):
+        with self.connection() as db:
+            return [dict(r) for r in db.execute(
+                "SELECT * FROM document_events ORDER BY created_at DESC, rowid DESC LIMIT 100")]
+
+    def delete(self, doc_id, actor_id="demo-owner"):
         with self.connection() as db:
             if db.execute("DELETE FROM documents WHERE id=?", (doc_id,)).rowcount == 0:
                 raise AppError(404, "document_not_found", "That document was not found.")
+            self._event(db, actor_id, "document.deleted", doc_id)
 
     def document_file(self, doc_id):
         with self.connection() as db:

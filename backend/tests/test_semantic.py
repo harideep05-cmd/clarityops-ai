@@ -65,3 +65,43 @@ def test_missing_model_is_controlled(settings, sample_pdf):
         r = upload(c, sample_pdf)
         assert r.status_code == 503 and r.json()["error"]["code"] == "embedding_unavailable"
         assert c.get("/documents").json()["documents"] == []
+
+
+def test_real_retrieval_keeps_concurrent_company_evidence_separate(settings, real_embeddings):
+    from concurrent.futures import ThreadPoolExecutor
+    from dataclasses import replace
+    from app.identity import IdentityRegistry
+    from app.gemini_service import Claim, GroundedResponse, validate_answer
+    from conftest import pdf_bytes
+
+    config = replace(settings, auth_mode="members")
+    registry = IdentityRegistry(config)
+    a = registry.create_workspace("Synthetic Alpha", "Owner A")
+    b = registry.create_workspace("Synthetic Beta", "Owner B")
+
+    class QuoteAnswerer:
+        def answer(self, question, evidence):
+            source = evidence[0]
+            return validate_answer(GroundedResponse(supported=True, claims=[
+                Claim(text=source["text"], source_id=source["source_id"], quote=source["text"])
+            ]), evidence)
+
+    with TestClient(create_app(config, real_embeddings, QuoteAnswerer())) as c:
+        cases = []
+        for company, days in [(a, 12), (b, 23)]:
+            auth = {"X-ClarityOps-Token": company["access_token"]}
+            result = c.post("/upload", headers=auth, files={"file": (
+                "Policy.pdf", pdf_bytes(f"Employees receive {days} casual leave days per calendar year."), "application/pdf")})
+            assert result.status_code == 201
+            cases.append((auth, days, result.json()["document"]["id"]))
+
+        def ask(case):
+            auth, days, doc_id = case
+            result = c.post("/ask", json={"prompt": "How much casual leave is allowed?"}, headers=auth).json()
+            assert result["status"] == "answered"
+            assert f"{days} casual leave days" in result["answer"]
+            assert {s["document_id"] for s in result["sources"]} == {doc_id}
+            assert all(s["page"] == 1 for s in result["sources"])
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(ask, cases * 3))

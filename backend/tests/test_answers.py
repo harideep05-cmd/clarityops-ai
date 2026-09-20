@@ -120,7 +120,7 @@ def test_unsupported_question_and_empty_workspace(client):
     assert result["status"] == "insufficient_evidence" and result["sources"] == []
 
 
-def test_provider_http_failure(settings):
+def test_provider_http_failure(settings, caplog):
     config = replace(settings, gemini_api_key="test-only-key")
     with TestClient(create_app(config, FakeEmbeddings()), headers={"X-ClarityOps-Token": TEST_TOKEN}) as c:
         upload(c, pdf_bytes())
@@ -130,6 +130,8 @@ def test_provider_http_failure(settings):
         ):
             r = c.post("/ask", json={"prompt": "casual leave?"})
         assert r.status_code == 502 and "private exception" not in r.text
+        assert r.json()["error"]["request_id"] in caplog.text
+        assert "private exception" not in caplog.text
 
 
 def test_concurrent_deletion_invalidates_answer(client):
