@@ -3,8 +3,8 @@ import logging
 import re
 
 from google import genai
-from google.genai import types
-from pydantic import BaseModel, Field, ValidationError
+from google.genai import errors, types
+from pydantic import BaseModel, Field
 
 from .config import Settings
 from .errors import AppError, INSUFFICIENT
@@ -21,6 +21,38 @@ class Claim(BaseModel):
 class GroundedResponse(BaseModel):
     supported: bool
     claims: list[Claim] = Field(max_length=6)
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate response field")
+        result[key] = value
+    return result
+
+
+def _reject_constant(value):
+    raise ValueError("Non-JSON numeric constant")
+
+
+def parse_provider_response(text: str) -> GroundedResponse:
+    """Strict local validation, separate from Gemini's supported schema subset.
+
+    Do not add extra='forbid' to the provider-facing models: the deployed
+    response_schema path rejected its additionalProperties keyword. Validate
+    exactly the model's fields here, then require real JSON types without coercion.
+    """
+    if not isinstance(text, str) or not text or len(text) > 128 * 1024:
+        raise ValueError("Invalid provider response size or type")
+    raw = json.loads(text, object_pairs_hook=_unique_object, parse_constant=_reject_constant)
+    if not isinstance(raw, dict) or set(raw) != set(GroundedResponse.model_fields):
+        raise ValueError("Invalid provider response fields")
+    if not isinstance(raw["claims"], list):
+        raise ValueError("Provider claims must be a list")
+    if any(not isinstance(c, dict) or set(c) != set(Claim.model_fields) for c in raw["claims"]):
+        raise ValueError("Invalid provider claim fields")
+    return GroundedResponse.model_validate(raw, strict=True)
 
 
 SYSTEM_INSTRUCTION = """You are ClarityOps, a company knowledge assistant.
@@ -152,43 +184,30 @@ class GeminiAnswerer:
                     ),
                 )
 
-                if not response.text:
-                    raise ValueError("Empty provider response")
+                result = parse_provider_response(response.text)
 
-                raw_result = json.loads(response.text)
-
-                # Gemini's response-schema API rejects Pydantic's
-                # `additionalProperties: false`, so strict unexpected-field
-                # validation is performed locally instead.
-                allowed_top = {"supported", "claims"}
-                allowed_claim = {"text", "source_id", "quote"}
-
-                if not isinstance(raw_result, dict):
-                    raise ValueError("Provider response must be an object")
-
-                if set(raw_result) - allowed_top:
-                    raise ValueError("Unexpected provider response fields")
-
-                claims = raw_result.get("claims")
-
-                if not isinstance(claims, list):
-                    raise ValueError("Provider claims must be a list")
-
-                if any(
-                    not isinstance(claim, dict)
-                    or bool(set(claim) - allowed_claim)
-                    for claim in claims
-                ):
-                    raise ValueError("Unexpected provider claim fields")
-
-                result = GroundedResponse.model_validate(raw_result)
-
-        except (ValidationError, ValueError, json.JSONDecodeError):
+        except ValueError:
             logger.warning("provider_invalid_response")
             raise AppError(
                 502,
                 "provider_invalid_response",
                 "The answer service returned an unusable response. Please retry.",
+            ) from None
+
+        except errors.APIError as exc:
+            if exc.code == 429:
+                logger.warning("provider_rate_limited")
+                raise AppError(
+                    503,
+                    "provider_rate_limited",
+                    "The answer service is rate limited or its quota is exhausted. "
+                    "Try later or contact the workspace owner.",
+                ) from None
+            logger.warning("provider_failure type=%s", type(exc).__name__)
+            raise AppError(
+                502,
+                "provider_unavailable",
+                "The answer service is temporarily unavailable. Please try again.",
             ) from None
 
         except Exception as exc:
