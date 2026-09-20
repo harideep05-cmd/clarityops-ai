@@ -13,7 +13,10 @@ export async function api(path, token, options = {}) {
       const data = await response.json().catch(() => ({}));
       const reference = response.status >= 500 && data.error?.request_id
         ? ` (Reference: ${data.error.request_id})` : "";
-      throw new Error((data.error?.message || `Request failed (${response.status}). Please retry.`) + reference);
+      const error = new Error((data.error?.message || `Request failed (${response.status}). Please retry.`) + reference);
+      error.status = response.status;
+      error.code = data.error?.code;
+      throw error;
     }
     if (response.status === 204) return null;
     if (download) return await response.blob();

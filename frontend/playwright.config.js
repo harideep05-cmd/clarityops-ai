@@ -19,6 +19,10 @@ export default defineConfig({
   fullyParallel: false,
   timeout: 60000,
   expect: { timeout: 15000 },
+  projects: [
+    { name: "demo", testMatch: "workflow.spec.js" },
+    { name: "members", testMatch: "members.spec.js", use: { baseURL: "http://127.0.0.1:15174" } },
+  ],
   use: {
     baseURL: "http://127.0.0.1:15173",
     trace: "retain-on-failure",
@@ -31,6 +35,20 @@ export default defineConfig({
       url: "http://127.0.0.1:18000/health",
       timeout: 60000,
       env: { CLARITYOPS_E2E: "1" },
+      reuseExistingServer: false,
+    },
+    {
+      command: `"${python}" tests/e2e_server.py`,
+      cwd: backend,
+      url: "http://127.0.0.1:18001/health",
+      timeout: 60000,
+      env: { CLARITYOPS_E2E: "1", CLARITYOPS_E2E_MODE: "members" },
+      reuseExistingServer: false,
+    },
+    {
+      command: "npm run dev -- --port 15174",
+      url: "http://127.0.0.1:15174",
+      env: { CLARITYOPS_API_TARGET: "http://127.0.0.1:18001" },
       reuseExistingServer: false,
     },
     {

@@ -3,6 +3,7 @@
 import os
 import sys
 import tempfile
+from unittest.mock import patch
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from app.config import Settings  # noqa: E402
 from app.embeddings import LocalEmbeddings  # noqa: E402
 from app.gemini_service import Claim, GroundedResponse, insufficient, validate_answer  # noqa: E402
 from app.main import create_app  # noqa: E402
+from app.identity import IdentityRegistry  # noqa: E402
 
 if os.getenv("CLARITYOPS_E2E") != "1":
     raise SystemExit("This test server requires CLARITYOPS_E2E=1")
@@ -47,13 +49,24 @@ if __name__ == "__main__":
     model = LocalEmbeddings(base)
     model.load()
     with tempfile.TemporaryDirectory(prefix="clarityops-e2e-") as directory:
+        mode = os.getenv("CLARITYOPS_E2E_MODE", "demo")
+        port = 18001 if mode == "members" else 18000
+        frontend_port = 15174 if mode == "members" else 15173
         settings = replace(
             base,
             data_dir=Path(directory),
             access_token="browser-test-only-token-" + "x" * 32,
+            auth_mode=mode,
             gemini_api_key="test-double-no-network",
-            cors_origins=("http://127.0.0.1:15173",),
+            cors_origins=(f"http://127.0.0.1:{frontend_port}",),
             requests_per_minute=1000,
         )
+        if mode == "members":
+            registry = IdentityRegistry(settings)
+            with patch("app.identity.new_token", side_effect=[
+                "browser-owner-token-" + "x" * 32, "browser-other-company-token-" + "y" * 32,
+            ]):
+                registry.create_workspace("Meridian Works", "Synthetic owner")
+                registry.create_workspace("Other Company", "Other owner")
         app = create_app(settings, model, SyntheticAnswerer())
-        uvicorn.run(app, host="127.0.0.1", port=18000, log_level="warning", access_log=False)
+        uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning", access_log=False)

@@ -645,3 +645,27 @@ textarea::placeholder {
     transition: none !important;
   }
 }
+.members-panel {
+  margin-top: 24px;
+  padding: 24px;
+  border: 1px solid var(--border, #dce4df);
+  border-radius: 16px;
+  background: #fff;
+}
+.members-panel p { color: #4c6157; line-height: 1.6; }
+.member-form { display: flex; gap: 16px; align-items: end; flex-wrap: wrap; margin: 20px 0; }
+.member-form label, .issued-access label { display: grid; gap: 8px; flex: 1; min-width: 180px; }
+.member-form input, .member-form select, .issued-access input {
+  width: 100%; padding: 12px; border: 1px solid #bacac0; border-radius: 8px; font: inherit;
+}
+.issued-access { padding: 16px; background: #f0f7f2; border-radius: 12px; }
+.member-actions { display: flex; gap: 24px; margin-top: 12px; }
+.member-list { list-style: none; margin: 16px 0 0; padding: 0; }
+.member-list li { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 0; border-bottom: 1px solid #e5ece7; }
+.member-list li div { min-width: 0; overflow-wrap: anywhere; }
+.member-list li div span { display: block; color: #526a5c; font-size: .85rem; margin-top: 6px; }
+@media (max-width: 600px) {
+  .members-panel { padding: 16px; }
+  .member-form { flex-direction: column; align-items: stretch; }
+  .member-list li { align-items: start; }
+}

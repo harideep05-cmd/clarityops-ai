@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { api, downloadDocument } from "./api";
+import Members from "./Members";
 import "./App.css";
 
 const suggestions = [
@@ -20,6 +21,16 @@ function App() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const input = useRef(null);
+  const activeToken = useRef("");
+  const canManage = status?.permissions?.manage_documents === true;
+
+  function reportError(error) {
+    if (activeToken.current !== token) return;
+    if (error.status === 401 || error.code === "access_revoked") {
+      lock();
+      setError("Your access expired or was revoked. Ask your workspace owner for new access.");
+    } else setError(error.message);
+  }
 
   async function connect(event) {
     event.preventDefault();
@@ -32,8 +43,13 @@ function App() {
       ]);
       setStatus(info);
       setDocuments(list.documents);
+      activeToken.current = credential;
       setToken(credential);
       setCredential("");
+      setQuestion("");
+      setAsked("");
+      setResult(null);
+      setNotice("");
     } catch (e) {
       setError(e.message);
     } finally {
@@ -56,7 +72,9 @@ function App() {
       const form = new FormData();
       form.append("file", file);
       const data = await api("/upload", token, { method: "POST", body: form });
+      if (activeToken.current !== token) return;
       const list = await api("/documents", token);
+      if (activeToken.current !== token) return;
       setDocuments(list.documents);
       setNotice(
         data.duplicate
@@ -64,9 +82,9 @@ function App() {
           : `${data.document.filename} is ready for questions.`,
       );
     } catch (e) {
-      setError(e.message);
+      reportError(e);
     } finally {
-      setBusy("");
+      if (activeToken.current === token) setBusy("");
     }
   }
 
@@ -79,17 +97,16 @@ function App() {
     setAsked(question.trim());
     setNotice("");
     try {
-      setResult(
-        await api("/ask", token, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt: question.trim() }),
-        }),
-      );
+      const answer = await api("/ask", token, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: question.trim() }),
+      });
+      if (activeToken.current === token) setResult(answer);
     } catch (e) {
-      setError(e.message);
+      reportError(e);
     } finally {
-      setBusy("");
+      if (activeToken.current === token) setBusy("");
     }
   }
 
@@ -105,18 +122,21 @@ function App() {
     setNotice("");
     try {
       await api(`/documents/${doc.id}`, token, { method: "DELETE" });
+      if (activeToken.current !== token) return;
       setDocuments(documents.filter((d) => d.id !== doc.id));
       setResult(null);
       setAsked("");
       setNotice(`${doc.filename} was removed.`);
     } catch (e) {
-      setError(e.message);
+      reportError(e);
     } finally {
-      setBusy("");
+      if (activeToken.current === token) setBusy("");
     }
   }
 
   function lock() {
+    activeToken.current = "";
+    setBusy("");
     setToken("");
     setDocuments([]);
     setStatus(null);
@@ -195,7 +215,7 @@ function App() {
         <main className="workspace">
           <div className="page-heading">
             <div>
-              <p className="eyebrow">YOUR WORKSPACE</p>
+              <p className="eyebrow">{status?.workspace?.name} · {status?.member?.role}</p>
               <h1>Company knowledge</h1>
               <p>
                 Ask a question. Get an answer you can trace back to the source.
@@ -239,7 +259,7 @@ function App() {
               <p className="panel-description">
                 Build a trusted source for your team.
               </p>
-              <input
+              {canManage && <><input
                 ref={input}
                 type="file"
                 accept=".pdf,application/pdf"
@@ -260,7 +280,7 @@ function App() {
                 Text-based PDF · Up to 10 MB · 100 pages
                 <br />
                 Scanned PDFs need a text layer.
-              </p>
+              </p></>}
               <div className="document-list" aria-live="polite">
                 {documents.length === 0 ? (
                   <div className="empty-docs">
@@ -268,7 +288,7 @@ function App() {
                       ≡
                     </div>
                     <h3>Your knowledge starts here</h3>
-                    <p>Upload a handbook, policy, or SOP to begin.</p>
+                    <p>{canManage ? "Upload a handbook, policy, or SOP to begin." : "Your workspace owner can add company documents here."}</p>
                   </div>
                 ) : (
                   documents.map((doc) => (
@@ -281,7 +301,7 @@ function App() {
                           <span aria-hidden="true">·</span> Ready
                         </p>
                       </div>
-                      <button
+                      {canManage && <button
                         className="remove-button"
                         onClick={() => remove(doc)}
                         disabled={!!busy}
@@ -289,7 +309,7 @@ function App() {
                         title="Remove document"
                       >
                         ×
-                      </button>
+                      </button>}
                       {doc.warnings.map((w) => (
                         <p key={w} className="document-warning">
                           {w}
@@ -300,8 +320,9 @@ function App() {
                 )}
               </div>
               <p className="workspace-note">
-                This workspace shares one document collection. Everyone with its
-                access token can read and remove documents.
+                {status?.workspace_mode === "members"
+                  ? "Documents are shared within your company. Owners manage knowledge; employees can ask questions and download sources."
+                  : "Local demo: everyone with this shared token can read and remove documents."}
               </p>
             </aside>
             <section
@@ -332,7 +353,7 @@ function App() {
                   <span>
                     {documents.length
                       ? "Grounded in your uploaded documents"
-                      : "Upload a document to start asking questions"}
+                      : canManage ? "Upload a document to start asking questions" : "Ask your workspace owner to add documents"}
                   </span>
                   <button
                     className="primary"
@@ -407,7 +428,7 @@ function App() {
                               try {
                                 await downloadDocument(source, token);
                               } catch (e) {
-                                setError(e.message);
+                                reportError(e);
                               }
                             }}
                           >
@@ -432,6 +453,7 @@ function App() {
               </p>
             </section>
           </div>
+          {status?.permissions?.manage_members && <Members token={token} memberId={status.member.id} onAccessError={reportError} />}
         </main>
       )}
       <footer className="footer">
