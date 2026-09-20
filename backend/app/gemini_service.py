@@ -4,7 +4,7 @@ import re
 
 from google import genai
 from google.genai import types
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from .config import Settings
 from .errors import AppError, INSUFFICIENT
@@ -13,14 +13,12 @@ logger = logging.getLogger("clarityops.provider")
 
 
 class Claim(BaseModel):
-    model_config = ConfigDict(extra="forbid")
     text: str = Field(min_length=1, max_length=1000)
     source_id: str
     quote: str = Field(min_length=8, max_length=1000)
 
 
 class GroundedResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
     supported: bool
     claims: list[Claim] = Field(max_length=6)
 
@@ -56,11 +54,14 @@ def insufficient():
 def validate_answer(result: GroundedResponse, evidence: list[dict]):
     if not result.supported or not result.claims:
         return insufficient()
+
     by_id = {e["source_id"]: e for e in evidence}
     sources, sentences = {}, []
+
     for claim in result.claims:
         source = by_id.get(claim.source_id)
         quote = " ".join(claim.quote.split())
+
         if (
             not source
             or len(quote) < 8
@@ -68,11 +69,13 @@ def validate_answer(result: GroundedResponse, evidence: list[dict]):
             or quote not in " ".join(source["text"].split())
         ):
             return insufficient()
+
         # Fail closed on fabricated numeric values and model-created labels/links.
         if not set(re.findall(r"\d+(?:\.\d+)?", claim.text)).issubset(
             set(re.findall(r"\d+(?:\.\d+)?", claim.quote))
         ) or re.search(r"\[S\d+\]|https?://", claim.text):
             return insufficient()
+
         if claim.source_id not in sources:
             sources[claim.source_id] = {
                 "id": claim.source_id,
@@ -84,10 +87,18 @@ def validate_answer(result: GroundedResponse, evidence: list[dict]):
                 "char_end": source["char_end"],
                 "quotes": [],
             }
+
         sources[claim.source_id]["quotes"].append(claim.quote)
         sentences.append(f"{claim.text.strip()} [{claim.source_id}]")
+
     answer = "\n\n".join(sentences)
-    return {"answer": answer, "response": answer, "status": "answered", "sources": list(sources.values())}
+
+    return {
+        "answer": answer,
+        "response": answer,
+        "status": "answered",
+        "sources": list(sources.values()),
+    }
 
 
 class GeminiAnswerer:
@@ -97,19 +108,29 @@ class GeminiAnswerer:
     def answer(self, question: str, evidence: list[dict]):
         if not evidence:
             return insufficient()
+
         if not self.settings.gemini_api_key:
             raise AppError(
                 503,
                 "provider_not_configured",
-                "Answer generation is not configured. Ask the workspace owner to add the Gemini API key on the server.",
+                "Answer generation is not configured. "
+                "Ask the workspace owner to add the Gemini API key on the server.",
             )
+
         payload = json.dumps(
             {
                 "question": question,
-                "evidence": [{k: e[k] for k in ("source_id", "filename", "page", "text")} for e in evidence],
+                "evidence": [
+                    {
+                        k: e[k]
+                        for k in ("source_id", "filename", "page", "text")
+                    }
+                    for e in evidence
+                ],
             },
             ensure_ascii=False,
         )
+
         try:
             with genai.Client(
                 api_key=self.settings.gemini_api_key,
@@ -130,16 +151,46 @@ class GeminiAnswerer:
                         thinking_config=types.ThinkingConfig(thinking_budget=0),
                     ),
                 )
+
                 if not response.text:
                     raise ValueError("Empty provider response")
-                result = GroundedResponse.model_validate_json(response.text)
-        except (ValidationError, ValueError):
+
+                raw_result = json.loads(response.text)
+
+                # Gemini's response-schema API rejects Pydantic's
+                # `additionalProperties: false`, so strict unexpected-field
+                # validation is performed locally instead.
+                allowed_top = {"supported", "claims"}
+                allowed_claim = {"text", "source_id", "quote"}
+
+                if not isinstance(raw_result, dict):
+                    raise ValueError("Provider response must be an object")
+
+                if set(raw_result) - allowed_top:
+                    raise ValueError("Unexpected provider response fields")
+
+                claims = raw_result.get("claims")
+
+                if not isinstance(claims, list):
+                    raise ValueError("Provider claims must be a list")
+
+                if any(
+                    not isinstance(claim, dict)
+                    or bool(set(claim) - allowed_claim)
+                    for claim in claims
+                ):
+                    raise ValueError("Unexpected provider claim fields")
+
+                result = GroundedResponse.model_validate(raw_result)
+
+        except (ValidationError, ValueError, json.JSONDecodeError):
             logger.warning("provider_invalid_response")
             raise AppError(
                 502,
                 "provider_invalid_response",
                 "The answer service returned an unusable response. Please retry.",
             ) from None
+
         except Exception as exc:
             logger.warning("provider_failure type=%s", type(exc).__name__)
             raise AppError(
@@ -147,4 +198,5 @@ class GeminiAnswerer:
                 "provider_unavailable",
                 "The answer service is temporarily unavailable. Please try again.",
             ) from None
+
         return validate_answer(result, evidence)
