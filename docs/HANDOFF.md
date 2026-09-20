@@ -1,5 +1,8 @@
 # ClarityOps AI — work-cycle handoff
 
+Historical 19 September handoff. The current state and pilot access model are in
+[20 September continuation](CONTINUATION_2026-09-20.md) and [pilot runbook](PILOT.md).
+
 19 September 2026. This extends the recovered application; it is not a replacement
 project. [Exact validation results](VERIFICATION.md) and [security review](SECURITY.md)
 are part of this handoff.

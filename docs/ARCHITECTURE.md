@@ -58,6 +58,14 @@ missing; live evaluation of this behavior remains required.
 
 ## Generation and evidence
 
+The provider-facing Pydantic models deliberately omit `extra="forbid"`: the owner
+observed the resulting `additionalProperties` keyword rejected on the deployed
+Gemini response-schema path. Local `parse_provider_response` instead rejects unknown
+or missing fields, duplicate JSON keys, malformed structures and type coercion before
+Pydantic strict validation. A non-live test uses the real SDK's HTTP serializer and
+an offline transport to check the outgoing schema recursively. This protects the
+observed compatibility assumption, not every future Gemini API/version.
+
 Use the [Google Gen AI SDK's structured responses](https://googleapis.github.io/python-genai/)
 with a JSON schema: supported flag and factual claims. Each claim must identify a
 retrieved source ID and quote supporting text verbatim. The system prompt treats
@@ -68,7 +76,8 @@ URL fetching, autonomous actions or generic-chat fallback are enabled.
 The server verifies known source IDs, nonblank exact quotations, and that numeric
 values in claims occur in their quotations. It attaches document/page metadata from
 its own index. A failed attribution check returns the standard insufficient-evidence
-response. Empty/invalid JSON and provider errors become controlled 502 responses.
+response. Empty/invalid JSON and most provider errors become controlled 502 responses;
+provider rate/quota exhaustion becomes a controlled 503 without automatic retries.
 Provider requests have a 30-second SDK timeout and one attempt; keys are initialized
 lazily. No retrieval result means no provider call.
 
@@ -76,3 +85,28 @@ These checks prove quote provenance, not that a natural-language claim logically
 follows from a quote. Numeric checks also do not cover every representation of a
 number. Real-provider evaluation, conflicting-version cases and prompt-injection
 cases are mandatory before making reliability claims to paying customers.
+
+## Opt-in pilot workspaces (20 September)
+
+`demo` retains the existing shared collection. `members` uses an identity registry
+with hashed 256-bit random credentials and an immutable principal for each request.
+Membership fixes the company and owner/employee role. There are no user-supplied
+tenant selectors and no shared-token fallback in member mode. Authenticated company
+IDs select separate knowledge databases; the public embedding model is shared.
+This keeps the retrieval code operating over exactly one company's rows, including
+deduplication, filename conflicts, citations, downloads and deletion.
+
+Owner-only mutations are rejected before parsing employee bodies. Membership writes
+recheck the actor in their transaction; indexing and generation recheck access after
+long operations. Expiry/revocation are read from the registry on each new request.
+Rate windows are company-specific; the four execution slots and Gemini account are
+still shared process resources. This is one-process pilot architecture, not a
+distributed SaaS or OS-level tenant sandbox.
+
+Document uploader metadata is an additive migration. Document management events
+commit with PDF/index changes; identity events commit with membership changes. The
+owner audit API merges their latest records within the authenticated company. Local
+operator bootstrap/recovery writes credentials exclusively to a private file.
+
+See [pilot runbook](PILOT.md) for access rules, deployment guards, data migration,
+backup/restore boundaries and remaining operational gates.

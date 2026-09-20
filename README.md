@@ -2,8 +2,9 @@
 
 ClarityOps is a company knowledge assistant built on the recovered FastAPI + React
 application. Upload a text-based PDF, ask a company question, and receive an answer
-with document/page evidence. It is a single-company local MVP, not yet a hosted,
-multi-tenant SaaS or an approved environment for confidential customer data.
+with document/page evidence. The original local demo remains available; an opt-in
+member mode now isolates company workspaces and separates owners from employees.
+This is a pilot foundation, not an approved hosted environment for confidential data.
 
 ## Current capabilities
 
@@ -12,13 +13,17 @@ multi-tenant SaaS or an approved environment for confidential customer data.
 - Grounded Gemini answers with validated source IDs, verbatim evidence and numeric checks.
 - Explicit insufficient-evidence responses; no generic Gemini chat fallback.
 - React upload, document list, questions, answers, source quotations, PDF downloads and deletion.
-- Workspace access token, bounded requests, rate/concurrency limits, and redacted errors.
+- Revocable, expiring member access with owner/employee permissions and separate company databases.
+- Bounded requests, per-workspace rate limits, redacted errors, and metadata-only management audit events.
 - Automated API, semantic retrieval, provider-contract and browser tests.
 
 **Verification boundary:** real local embeddings and ingestion are tested. Provider
-contract/failure tests use a simulated SDK. The browser test server uses a clearly
-separate test-only answer generator. Live Gemini tests require a key and explicit
-opt-in; see [the verification report](docs/VERIFICATION.md) for actual results.
+contract/failure tests use SDK mocks and the real SDK with an offline HTTP transport.
+The browser test server uses a separate test-only answer generator. Live Gemini tests require a key and explicit
+opt-in. The owner reported seven successful live tests and Windows browser use after
+commit `1c06282`; later provider failures were reported as quota exhaustion. This Work
+run made no live Gemini calls. See [current results](docs/CONTINUATION_2026-09-20.md)
+and the [original verification report](docs/VERIFICATION.md).
 
 ## Architecture
 
@@ -38,7 +43,9 @@ flowchart TD
 
 No vector database service is required. `BAAI/bge-small-en-v1.5` runs on the CPU
 through FastEmbed/ONNX, using a pinned model revision and 384-dimensional vectors.
-Only the question and up to five retrieved snippets are sent to Gemini. Original
+In member mode, the authenticated membership selects a separate SQLite database;
+no client-supplied company ID selects storage or retrieval. Only the question and
+up to five retrieved snippets are sent to Gemini. Original
 PDFs and embeddings remain on the machine hosting the backend. No question or
 answer history is persisted by ClarityOps.
 
@@ -119,13 +126,43 @@ not a production deployment. To use it on port 4173, explicitly include
 | --- | --- |
 | `GEMINI_API_KEY` | Backend-only provider secret; blank permits startup and ingestion. |
 | `GEMINI_MODEL` | Defaults to the existing `gemini-2.5-flash`; other models need validation. |
-| `CLARITYOPS_ACCESS_TOKEN` | At least 32 random characters; required for all document/answer endpoints. |
+| `CLARITYOPS_AUTH_MODE` | `demo` (default, existing shared collection) or `members` (isolated companies). |
+| `CLARITYOPS_DEPLOYMENT` | `local` (default) or `private`; private requires member mode and HTTPS CORS origins. This does not create TLS or deploy anything. |
+| `CLARITYOPS_ACCESS_TOKEN` | At least 32 random characters for demo mode; ignored in member mode. |
 | `CLARITYOPS_DATA_DIR` | Defaults to `backend/data`; relative values resolve against backend, not shell cwd. |
 | `CLARITYOPS_CORS_ORIGINS` | Comma-separated exact frontend origins; wildcard is rejected. |
 
 `.env` loading does not override existing environment variables. Restart the backend
 after changes. Browser tokens stay in memory and are cleared on reload/lock.
-All token holders have the same read, upload and delete permissions.
+Demo-token holders have equal permissions. Member tokens identify one person/role in
+one company, expire within 30 days and can be revoked by an owner. They are access
+credentials, not password-based accounts or SSO sessions.
+
+## Isolated company workspaces and member access
+
+After the ordinary setup above, from `backend` on Windows:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\pilot_admin.py create-workspace --name "Synthetic Company" --owner "Owner" --credential-file .\data\owner-access.json
+notepad .env
+notepad .\data\owner-access.json
+```
+
+Set `CLARITYOPS_AUTH_MODE=members` in `.env` and restart the backend. Use the new
+owner token from the private JSON file to unlock. The helper never prints tokens and
+refuses to overwrite a credential file. If you changed `CLARITYOPS_DATA_DIR`, choose
+a credential-file path inside that directory instead. Treat the file as a secret.
+
+Owners upload/remove PDFs and use **Manage member access** to create or revoke
+employee/owner tokens. Employees can list documents, ask questions and download
+sources; write operations are denied by the server before body parsing. Tokens are
+shown once and stored as hashes. Company creation/recovery requires a local operator;
+there is no public registration endpoint.
+
+This mode starts with empty isolated collections. Existing demo documents stay in
+their original database; they are never assigned to a company automatically. Re-upload
+only deliberately approved PDFs. Full [pilot setup, roles, recovery, backup and
+hosting runbook](docs/PILOT.md).
 
 ## Usage and demo
 
@@ -156,6 +193,9 @@ allowed origins are supported. API documentation routes are disabled in this MVP
 | `GET /documents/{id}/file` | Authenticated attachment download. |
 | `DELETE /documents/{id}` | Atomically removes the PDF and its chunks/vectors; 204 success. |
 | `POST /ask` | JSON `{"prompt":"your question"}`; answer, status and structured sources. |
+| `GET /members`, `POST /members` | Member-mode owners list or issue scoped access. Creation returns a token once. |
+| `DELETE /members/{id}` | Member-mode owner revokes another member; cannot revoke self. |
+| `GET /audit` | Owner-only latest 100 document/membership management events. No question text or document content. |
 
 `/ask` retains `response` as an alias of `answer` for the recovered frontend contract.
 A source includes `document_id`, `document`, `page`, `chunk_id`, normalized character
@@ -164,7 +204,9 @@ page numbering. Retrieval similarity is not presented as answer confidence.
 
 Errors are `{"error":{"code":"...","message":"...","request_id":"..."}}`.
 Validation/type errors use 400/415/422, size errors 413, access errors 401/403,
-conflicts 409, limits 429, missing model/key 503, and provider failures 502.
+conflicts 409, local limits 429, missing model/key or provider quota 503, and other
+provider failures 502. `provider_rate_limited` does not mean a schema regression;
+stop repeated calls and check provider quota before retrying later.
 
 ## Tests
 
@@ -194,12 +236,13 @@ usage charges. Configure your key, then explicitly opt in:
 
 ```powershell
 $env:RUN_LIVE_GEMINI="1"
-.\.venv\Scripts\python.exe -m pytest -m live -q
+.\.venv\Scripts\python.exe -m pytest -m live -q -x
 Remove-Item Env:RUN_LIVE_GEMINI
 ```
 
-POSIX equivalent: `RUN_LIVE_GEMINI=1 .venv/bin/python -m pytest -m live -q`.
-Live tests fail if opted in without a key; they are skipped by default.
+POSIX equivalent: `RUN_LIVE_GEMINI=1 .venv/bin/python -m pytest -m live -q -x`.
+Live tests fail if opted in without a key; they are skipped by default. `-x` stops at
+the first failure. If quota is exhausted, stop and wait; do not repeatedly rerun them.
 
 From `frontend`:
 
@@ -211,8 +254,8 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-Browser tests start isolated servers on ports 18000/15173, with a disposable
-workspace, real extraction/retrieval, and a **test-only answer generator**. The
+Browser tests start isolated servers on ports 18000/15173 (demo) and 18001/15174
+(members), with disposable workspaces, real extraction/retrieval, and a **test-only answer generator**. The
 production app never selects this generator. Prepare embeddings and install backend
 dev requirements first. `PLAYWRIGHT_CHROMIUM_EXECUTABLE` may specify an existing
 compatible Chromium executable if the standard browser download is unavailable.
@@ -229,11 +272,13 @@ and the equivalent development command.
   and image-only pages may lose meaning. Blank pages produce visible warnings.
 - 10 MiB/file, 100 pages, 500,000 extracted characters; 50 documents and 5,000 chunks
   per workspace. Limits are explicit in `app/config.py`.
-- One process/one company. Local exact vector scans suit this bounded corpus.
-  No tenant accounts, document ACLs, separate admin role, SSO or billing.
-- A shared token is a local demo gate, not tenant isolation for a hosted SaaS.
-  Before a real pilot: scoped identity/permissions, private TLS deployment,
-  provider data terms/retention review, backup/restore tests, and broader evaluations.
+- One server process; up to 20 member-mode companies, 100 member records/company
+  (including revoked records), and the document/chunk limits above per company.
+  Company databases are separate; model files and server/provider capacity are shared.
+- Member tokens provide owner/employee authorization, not password accounts, MFA,
+  SSO or per-document ACLs. Demo mode still uses a shared token and must stay local.
+  Before a real pilot: private TLS deployment, encrypted storage/backups, provider
+  data terms/retention review, operational monitoring and broader evaluations.
 - Prompts and citation checks reduce fabrication; they do **not** prove semantic
   entailment or resistance to every prompt injection. Live answer quality is a gate.
 - SQLite stores original PDFs and derived text unencrypted. OS encryption and

@@ -1,5 +1,8 @@
 # Verification report — 19 September 2026
 
+Historical checkpoint. For the subsequent Gemini fix, member workspaces and current
+test results, see [20 September continuation](CONTINUATION_2026-09-20.md).
+
 Scope: the recovered application on `codex/company-knowledge-mvp`. Linux x86-64,
 Python 3.12.14, Node 24.19.0. No customer documents or live Gemini credentials were
 used. Windows commands are documented but have not been executed on Windows.
